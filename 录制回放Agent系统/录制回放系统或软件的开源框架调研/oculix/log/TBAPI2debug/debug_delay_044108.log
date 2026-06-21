@@ -1,2 +1,0 @@
-[1:1]
-57ms sql:SELECT * FROMCOORD ('{\"Version\": \"1.0.0\",\"TerminalType\": \"S\",\"InstanceID\": \"1\",\"Object\": \"F5\",\"Operation\": \"FetchData\",\"Subject\": \"Authorization\",\"Parameter\": {\"Key\":\"AuthorizationList\",\"Value\":{\"Terminal\":\"WFT.M\"}}}') OPTION(SVC_NAME = 'GRS.Misc')
