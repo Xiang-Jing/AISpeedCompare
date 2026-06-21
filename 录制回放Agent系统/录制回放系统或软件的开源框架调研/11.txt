@@ -1,0 +1,119 @@
+1.Power Automate Desktop b闭源软件，个人使用
+2.Airtest
+3.O/SikuliX
+4.AutoHotKey + Provider's Macro Creator 不行不可安装
+5.
+
+ Get-Process | Where-Object {$_.MainWindowTitle -ne ""} | Select-Object Id,ProcessName,MainWindowTitle
+
+
+
+ # -*- coding: utf-8 -*-
+from sikuli import *
+import json
+import os
+import sys
+
+
+PERIOD_IMAGES = {
+    u"03": "yijixuanxiang.png",
+    u"06": "zhongbaoxuanxiang.png",
+    u"09": "sanjixuanxiang.png",
+    u"12": "nianbaoxuanxiang.png",
+}
+
+
+def load_cases():
+    json_input = sys.argv[1] if len(sys.argv) > 1 else os.path.join(getBundlePath(), "input.json")
+    if os.path.isfile(json_input):
+        with open(json_input, "rb") as json_file:
+            payload = json.load(json_file)
+    else:
+        payload = json.loads(json_input)
+
+    if isinstance(payload, dict):
+        if "stockCode" in payload and "reportDate" in payload:
+            payload = [payload]
+        else:
+            payload = payload.get("data", payload.get("items", payload.get("cases", [])))
+
+    cases = []
+    for item in payload:
+        stock_code = unicode(item["stockCode"])
+        report_date = unicode(item["reportDate"])
+        if len(report_date) < 6 or report_date[4:6] not in PERIOD_IMAGES:
+            raise ValueError("unsupported reportDate: %s" % report_date)
+        cases.append((stock_code, report_date))
+    return cases
+
+
+def open_ede():
+    wait("jianpanjingling.png", 10).click()
+    type("a", Key.CTRL)
+    paste("EDE")
+    type(Key.ENTER)
+    wait(5)
+
+
+def enter_all_codes(cases):
+    entered_codes = []
+    for stock_code, report_date in cases:
+        if stock_code in entered_codes:
+            continue
+        wait("shurudaima.png", 10).click()
+        type("a", Key.CTRL)
+        paste(stock_code)
+        wait(1)
+        type(Key.ENTER)
+        wait(1)
+        entered_codes.append(stock_code)
+        print("code entered: %s" % stock_code)
+
+
+def unique_report_dates(cases):
+    report_dates = []
+    for stock_code, report_date in cases:
+        if report_date not in report_dates:
+            report_dates.append(report_date)
+    return report_dates
+
+
+def select_indicator(report_date):
+    year = report_date[:4]
+    month = report_date[4:6]
+
+    wait("searchbypinyin.png", 10).click()
+    waitVanish("searchbypinyin.png", 5)
+    paste(u"每股转增股本-内地股票指标-分红指标")
+    type(Key.ENTER)
+    wait("meiguzhuanzenggubenshuangji.png", 10).doubleClick()
+    waitVanish("meiguzhuanzenggubenshuangji.png", 5)
+    wait(Pattern("nianfenxuanze.png").targetOffset(-72,0), 10).click()
+    type(year)
+    type(Key.ENTER)
+    wait(Pattern("jiduxuanze.png").exact(), 10).click()
+    wait(0.8)
+    wait(PERIOD_IMAGES[month], 10).click()
+    wait(3)
+    type(Key.ENTER)
+    wait(1)
+    print("indicator selected for reportDate: %s" % report_date)
+
+
+App.focus(u"Wind金融终端..Alice")
+wait(3)
+
+cases = load_cases()
+open_ede()
+enter_all_codes(cases)
+
+for report_date in unique_report_dates(cases):
+    select_indicator(report_date)
+
+wait("tiqushuju.png", 10).click()
+wait("daochushuju.png", 10).click()
+waitVanish("daochushuju.png", 5)
+wait(Pattern("quxiaoxiazaiwandakai.png").targetOffset(-25,0), 10).click()
+
+wait(Pattern("daochuwenjianming.png").targetOffset(36,0), 10).click()
+

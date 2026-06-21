@@ -1,0 +1,25 @@
+{
+  "outputFileName": "test_file",
+  "params": [
+    {
+      "stockCode": "688012.SH",
+      "reportDate": "20241230"
+    },
+    {
+      "stockCode": "605128.SH",
+      "reportDate": "20241230"
+    },
+    {
+      "stockCode": "300893.SZ",
+      "reportDate": "20241230"
+    },
+    {
+      "stockCode": "688697.SH",
+      "reportDate": "20251230"
+    },
+    {
+      "stockCode": "000034.SZ",
+      "reportDate": "20251230"
+    }
+  ]
+}
