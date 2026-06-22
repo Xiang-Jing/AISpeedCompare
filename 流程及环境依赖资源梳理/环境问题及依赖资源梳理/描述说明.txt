@@ -1,4 +1,338 @@
 南京加工主站调用竞品机接口
 竞品机的机器
 
+建议串行
+
+
+# -*- coding: utf-8 -*-
+import asyncio
+import json
+import os
+import re
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Optional, Union
+from urllib.parse import quote
+
+import httpx
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+
+# OculiX -s server 地址
+# 你的启动命令：
+# java -jar oculixide-3.0.4-windows.jar -s 50001
+OCULIX_BASE_URL = os.getenv(
+    "OCULIX_BASE_URL",
+    "http://127.0.0.1:50001"
+).rstrip("/")
+
+
+# OculiX Server 里的脚本路径，必须用 /，不要用 \
+# 对应实际目录 D:\sikuli
+OCULIX_SCRIPT_CMD = os.getenv(
+    "OCULIX_SCRIPT_CMD",
+    "D:/sikuli"
+).replace("\\", "/").strip("/")
+
+
+# Windows 文件系统真实路径，用来写 input.json
+OCULIX_SCRIPT_FS_ROOT = os.getenv(
+    "OCULIX_SCRIPT_FS_ROOT",
+    r"D:\sikuli"
+)
+
+
+# 桌面自动化必须串行，不然多个请求会同时抢鼠标键盘
+RUN_LOCK = asyncio.Lock()
+
+
+# 脚本名只允许简单名称，不允许路径穿越
+# demo -> D:\sikuli\demo.sikuli
+SAFE_SCRIPT_NAME = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+class OculixResult(BaseModel):
+    status_code: int
+    text: str
+    json_data: Optional[Any] = None
+
+
+class RunRequest(BaseModel):
+    script_name: str = Field(
+        ...,
+        description="脚本名，不带 .sikuli 后缀，例如 demo、stock_batch"
+    )
+
+    input: Optional[Union[dict, list]] = Field(
+        default=None,
+        description="结构化参数，会写入脚本目录下的 input.json"
+    )
+
+    input_filename: str = Field(
+        default="input.json",
+        description="写入的参数文件名，默认 input.json"
+    )
+
+
+class RawCommandRequest(BaseModel):
+    command: str = Field(
+        ...,
+        description="直接透传给 OculiX Server 的命令，例如 scripts/D:/sikuli/demo.sikuli/run"
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    timeout = httpx.Timeout(
+        connect=10.0,
+        read=float(os.getenv("OCULIX_READ_TIMEOUT_SECONDS", "3600")),
+        write=30.0,
+        pool=10.0,
+    )
+
+    app.state.oculix_client = httpx.AsyncClient(
+        base_url=OCULIX_BASE_URL,
+        timeout=timeout,
+    )
+
+    yield
+
+    await app.state.oculix_client.aclose()
+
+
+app = FastAPI(
+    title="OculiX FastAPI Wrapper",
+    version="1.2.0",
+    lifespan=lifespan,
+)
+
+
+def check_script_name(script_name: str) -> None:
+    if not SAFE_SCRIPT_NAME.match(script_name):
+        raise HTTPException(
+            status_code=400,
+            detail="script_name 只能包含字母、数字、下划线、横线，不要带 .sikuli 后缀，也不要带路径"
+        )
+
+
+def check_simple_filename(filename: str) -> None:
+    if filename != Path(filename).name:
+        raise HTTPException(
+            status_code=400,
+            detail="input_filename 只能是简单文件名，不能包含路径"
+        )
+
+
+async def call_oculix(command: str) -> OculixResult:
+    """
+    调用 OculiX SikulixServer。
+
+    正确执行脚本的命令形式：
+        scripts/D:/sikuli/demo.sikuli/run
+
+    实际请求：
+        http://127.0.0.1:50001/scripts/D:/sikuli/demo.sikuli/run
+    """
+    command = command.strip("/")
+
+    # 保留冒号，因为 D:/sikuli 有盘符
+    encoded_command = quote(command, safe="/._-:")
+
+    try:
+        client: httpx.AsyncClient = app.state.oculix_client
+        resp = await client.get(f"/{encoded_command}")
+
+        json_data = None
+        try:
+            json_data = resp.json()
+        except Exception:
+            pass
+
+        return OculixResult(
+            status_code=resp.status_code,
+            text=resp.text,
+            json_data=json_data,
+        )
+
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"无法连接 OculiX Server: {OCULIX_BASE_URL}, error={repr(e)}"
+        )
+
+
+async def write_input_json(
+    script_name: str,
+    input_obj: Any,
+    input_filename: str = "input.json",
+) -> str:
+    """
+    写入：
+        D:\\sikuli\\{script_name}.sikuli\\input.json
+
+    例如：
+        D:\\sikuli\\demo.sikuli\\input.json
+    """
+    check_script_name(script_name)
+    check_simple_filename(input_filename)
+
+    root = Path(OCULIX_SCRIPT_FS_ROOT).expanduser().resolve()
+    script_dir = (root / f"{script_name}.sikuli").resolve()
+
+    if not script_dir.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"脚本目录不存在: {script_dir}"
+        )
+
+    if root != script_dir and root not in script_dir.parents:
+        raise HTTPException(
+            status_code=400,
+            detail="非法脚本目录路径"
+        )
+
+    input_path = script_dir / input_filename
+
+    data = json.dumps(
+        input_obj,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    await asyncio.to_thread(
+        input_path.write_text,
+        data,
+        encoding="utf-8"
+    )
+
+    return str(input_path)
+
+
+@app.get("/health")
+async def health():
+    return {
+        "fastapi": "ok",
+        "oculix_base_url": OCULIX_BASE_URL,
+        "script_cmd": OCULIX_SCRIPT_CMD,
+        "script_fs_root": OCULIX_SCRIPT_FS_ROOT,
+    }
+
+
+@app.get("/oculix/ping")
+async def ping_oculix():
+    """
+    测试 OculiX Server 是否可访问。
+    """
+    try:
+        client: httpx.AsyncClient = app.state.oculix_client
+        resp = await client.get("/", timeout=2.0)
+
+        return {
+            "reachable": True,
+            "status_code": resp.status_code,
+            "text": resp.text[:1000],
+        }
+
+    except httpx.RequestError as e:
+        return {
+            "reachable": False,
+            "error": repr(e),
+        }
+
+
+@app.get("/oculix/script/{script_name}")
+async def check_script(script_name: str):
+    """
+    检查某个脚本是否能被 OculiX Server 识别。
+
+    例如：
+        GET /oculix/script/demo
+
+    内部调用：
+        /scripts/D:/sikuli/demo.sikuli
+    """
+    check_script_name(script_name)
+
+    command = f"scripts/{OCULIX_SCRIPT_CMD}/{script_name}.sikuli"
+
+    return {
+        "script_name": script_name,
+        "oculix_command": command,
+        "oculix": await call_oculix(command),
+    }
+
+
+@app.post("/oculix/run")
+async def run_script(req: RunRequest):
+    """
+    执行 OculiX/Sikuli 脚本。
+
+    请求：
+        script_name = demo
+
+    会先写：
+        D:\\sikuli\\demo.sikuli\\input.json
+
+    然后调用：
+        http://127.0.0.1:50001/scripts/D:/sikuli/demo.sikuli/run
+    """
+    check_script_name(req.script_name)
+
+    async with RUN_LOCK:
+        input_path = None
+
+        if req.input is not None:
+            input_path = await write_input_json(
+                script_name=req.script_name,
+                input_obj=req.input,
+                input_filename=req.input_filename,
+            )
+
+        run_cmd = f"scripts/{OCULIX_SCRIPT_CMD}/{req.script_name}.sikuli/run"
+
+        result = await call_oculix(run_cmd)
+
+        # OculiX 本身 HTTP 可能是 200，但脚本 exitCode 可能是 1
+        exit_code = None
+        status = None
+
+        if isinstance(result.json_data, dict):
+            exit_code = result.json_data.get("exitCode")
+            status = result.json_data.get("status")
+
+        return {
+            "script_name": req.script_name,
+            "script_root": OCULIX_SCRIPT_FS_ROOT,
+            "input_path": input_path,
+            "oculix_command": run_cmd,
+            "status": status,
+            "exit_code": exit_code,
+            "success": result.status_code == 200 and exit_code == 0,
+            "oculix": result,
+        }
+
+
+@app.post("/oculix/raw")
+async def raw_command(req: RawCommandRequest):
+    """
+    调试用，直接透传 OculiX 命令。
+
+    例如 body:
+    {
+      "command": "scripts/D:/sikuli/demo.sikuli/run"
+    }
+    """
+    async with RUN_LOCK:
+        return await call_oculix(req.command)
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "oculix_api:app",
+        host=os.getenv("FASTAPI_HOST", "0.0.0.0"),
+        port=int(os.getenv("FASTAPI_PORT", "8000")),
+        reload=False,
+    )
 
